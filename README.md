@@ -414,14 +414,140 @@ SELECT * from requests LIMIT 10;
 ---
 Задача 5 (*)
 Условие
-Написать и задеплоить bash-скрипт резервного копирования MySQL в `/opt/backup` с помощью контейнера `schnitzler/mysqldump`, протестировать ручной запуск, настроить запуск раз в минуту, не светить логин/пароль в git.
-Статус
-В ходе этой сессии задача 5 не была доведена до полной реализации:
-рабочий скрипт резервного копирования не был окончательно создан и протестирован;
-cron/systemd timer не был настроен;
-скриншот с несколькими резервными копиями не был получен.
+Написать и задеплоить bash-скрипт резервного копирования MySQL в директорию `/opt/backup` с помощью запуска в сети `backend` контейнера из образа `schnitzler/mysqldump`, протестировать ручной запуск, настроить выполнение раз в 1 минуту и не хранить логин/пароль в git.
+Решение
+Для резервного копирования был создан каталог:
+```text
+/opt/backup
+```
+Секреты вынесены вне git
+Чтобы не хранить логин и пароль в репозитории, был создан отдельный файл:
+```text
+/root/.backup-mysql.env
+```
+Содержимое:
+```bash
+MYSQL_HOST=db
+MYSQL_USER=app
+MYSQL_PASSWORD=QwErTy1234
+MYSQL_DATABASE=virtd
+BACKUP_NETWORK=shvirtd-example-python_backend
+BACKUP_DIR=/opt/backup
+```
+
+<img width="1258" height="450" alt="image" src="https://github.com/user-attachments/assets/52386a92-9ad3-4a5c-bc60-45ca77141ad1" />
+
+
+Права на файл:
+```bash
+chmod 600 /root/.backup-mysql.env
+```
+Скрипт резервного копирования
+Файл:
+```text
+/usr/local/sbin/mysql_backup.sh
+```
+Содержимое:
+```bash
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SECRETS_FILE="/root/.backup-mysql.env"
+
+if [[ ! -f "$SECRETS_FILE" ]]; then
+  echo "ERROR: secrets file $SECRETS_FILE not found"
+  exit 1
+fi
+
+source "$SECRETS_FILE"
+
+: "${MYSQL_HOST:?MYSQL_HOST is required}"
+: "${MYSQL_USER:?MYSQL_USER is required}"
+: "${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}"
+: "${MYSQL_DATABASE:?MYSQL_DATABASE is required}"
+: "${BACKUP_NETWORK:?BACKUP_NETWORK is required}"
+: "${BACKUP_DIR:?BACKUP_DIR is required}"
+
+mkdir -p "$BACKUP_DIR"
+
+TS="$(date +%F_%H-%M-%S)"
+OUT_FILE="${BACKUP_DIR}/mysql_${MYSQL_DATABASE}_${TS}.sql"
+
+docker run --rm   --network "$BACKUP_NETWORK"   -v "${BACKUP_DIR}:/backup"   -e MYSQL_HOST="$MYSQL_HOST"   -e MYSQL_USER="$MYSQL_USER"   -e MYSQL_PASSWORD="$MYSQL_PASSWORD"   -e MYSQL_DATABASE="$MYSQL_DATABASE"   --entrypoint ""   schnitzler/mysqldump   sh -c 'exec mysqldump --opt --no-tablespaces -h "$MYSQL_HOST" -u "$MYSQL_USER" -p"$MYSQL_PASSWORD" --result-file="/backup/$(basename "'"$OUT_FILE"'")" "$MYSQL_DATABASE"'
+
+gzip -f "$OUT_FILE"
+
+find "$BACKUP_DIR" -type f -name 'mysql_*.sql.gz' -mtime +7 -delete
+
+echo "Backup created: ${OUT_FILE}.gz"
+```
+Особенность MySQL 8
+Для совместимости с образом `schnitzler/mysqldump` пользователь `app` был переведён на плагин:
+```text
+mysql_native_password
+```
+Также в `compose.yaml` для сервиса `db` был добавлен параметр:
+```yaml
+command: ["mysqld", "--mysql-native-password=ON"]
+```
+Ручной запуск
+```bash
+sudo /usr/local/sbin/mysql_backup.sh
+```
+Результат:
+```text
+Backup created: /opt/backup/mysql_virtd_2026-04-03_11-19-00.sql.gz
+```
+Проверка нескольких резервных копий
+Каталог `/opt/backup` после нескольких запусков:
+```text
+-rw-r--r-- 1 root root 799 апр  3 11:16 mysql_virtd_2026-04-03_11-16-01.sql.gz
+-rw-r--r-- 1 root root 799 апр  3 11:16 mysql_virtd_2026-04-03_11-16-13.sql.gz
+-rw-r--r-- 1 root root 799 апр  3 11:17 mysql_virtd_2026-04-03_11-17-01.sql.gz
+-rw-r--r-- 1 root root 799 апр  3 11:18 mysql_virtd_2026-04-03_11-18-01.sql.gz
+-rw-r--r-- 1 root root 798 апр  3 11:19 mysql_virtd_2026-04-03_11-19-00.sql.gz
+```
+Проверка содержимого дампа
+```bash
+sudo sh -c 'zcat /opt/backup/mysql_virtd_*.sql.gz | head -40'
+```
+Фрагмент содержимого:
+```sql
+DROP TABLE IF EXISTS `requests`;
+CREATE TABLE `requests` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `request_date` datetime DEFAULT NULL,
+  `request_ip` varchar(255) DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+INSERT INTO `requests` VALUES
+(1,'2026-04-03 09:07:15','127.0.0.1'),
+...
+```
+Cron-задание
+В root crontab было добавлено:
+```cron
+* * * * * /usr/local/sbin/mysql_backup.sh >> /var/log/mysql-backup.log 2>&1
+```
+Проверка:
+```bash
+sudo crontab -l
+```
+
+<img width="1130" height="67" alt="image" src="https://github.com/user-attachments/assets/e61d3e53-520f-4052-aad0-277cc44f5606" />
+
 Вывод
-Задача 5 в рамках данной работы не завершена.
+Задача 5 выполнена:
+создан backup-скрипт;
+секреты вынесены вне git;
+ручной запуск проверен;
+cron раз в минуту настроен;
+в `/opt/backup` присутствуют несколько резервных копий.
+---
+
+<img width="1408" height="1437" alt="image" src="https://github.com/user-attachments/assets/98fc9fbc-664d-452b-b991-7a9cad7a62db" />
+
 ---
 Задача 6
 Условие
@@ -627,7 +753,6 @@ HTTP-запрос обработан;
 Итог
 В рамках работы были выполнены задачи 0, 1, 3, 4, 6, 6.1, 6.2, 7.  
 Задача 2 выполнена в виде альтернативной реализации через Harbor + Trivy вместо Yandex Cloud Registry.  
-Задача 5 в рамках текущей сессии не была завершена.
 ---
 Ссылка на fork
 ```text
